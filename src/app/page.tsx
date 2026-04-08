@@ -60,6 +60,8 @@ type ExtraScope = {
   icon: string;
   scopes: string[];
   description: string;
+  /** Texto que se muestra en el pop-up de autorización de Toka */
+  usage: string;
 };
 
 const EXTRA_SCOPES: ExtraScope[] = [
@@ -70,6 +72,7 @@ const EXTRA_SCOPES: ExtraScope[] = [
     icon: "📱",
     scopes: ["PLAINTEXT_MOBILE_PHONE", "PLAINTEXT_EMAIL_ADDRESS"],
     description: "Teléfono y correo electrónico",
+    usage: "Para enviarte notificaciones y confirmaciones de tus operaciones",
   },
   {
     id: "address",
@@ -78,6 +81,7 @@ const EXTRA_SCOPES: ExtraScope[] = [
     icon: "📍",
     scopes: ["USER_ADDRESS"],
     description: "Dirección del usuario",
+    usage: "Para pre-llenar tu dirección de envío en el proceso de compra",
   },
   {
     id: "personal",
@@ -92,6 +96,7 @@ const EXTRA_SCOPES: ExtraScope[] = [
       "USER_BIRTHDAY",
     ],
     description: "Nombre completo, género y fecha de nacimiento",
+    usage: "Para personalizar tu experiencia y verificar tu identidad en la plataforma",
   },
 ];
 
@@ -194,7 +199,7 @@ export default function TokaApp() {
 
   // ── Llama un JSAPI del bridge ────────────────────────────────────────────────
   const callBridge = useCallback(
-    (method: string, scopes: string[]): Promise<string> => {
+    (method: string, scopes: string[], usage: string): Promise<string> => {
       return new Promise((resolve, reject) => {
         const bridge = getBridge();
         if (!bridge) {
@@ -217,7 +222,7 @@ export default function TokaApp() {
 
         try {
           const result = bridge.call(apiMethod, {
-            usage: method,
+            usage,  // ← se muestra en el pop-up de autorización del usuario
             scopes,
             success: (res) => {
               const code = extractAuthCode(res);
@@ -266,11 +271,11 @@ export default function TokaApp() {
     addLog("ok", "AlipayJSBridge detectado ✓ — iniciando autenticación...");
 
     try {
-      const code = await callBridge("DigitalIdentity", [
-        "USER_ID",
-        "USER_AVATAR",
-        "USER_NICKNAME",
-      ]);
+      const code = await callBridge(
+        "DigitalIdentity",
+        ["USER_ID", "USER_AVATAR", "USER_NICKNAME"],
+        "Para identificarte de forma segura dentro de la aplicación",
+      );
 
       addLog("ok", `DigitalIdentity authCode obtenido ✓`);
       const session = await exchangeAuthCode(code);
@@ -324,7 +329,7 @@ export default function TokaApp() {
       setExtraError((prev) => ({ ...prev, [scope.id]: "" }));
 
       try {
-        const code = await callBridge(scope.method, scope.scopes);
+        const code = await callBridge(scope.method, scope.scopes, scope.usage);
         setExtraCodes((prev) => ({ ...prev, [scope.id]: code }));
         addLog("ok", `[${scope.method}] authCode obtenido ✓`);
       } catch (err) {
