@@ -33,9 +33,14 @@ type BridgeResponse = {
 
 type BridgeCallOptions = {
   usage: string;
-  scopes: string[];
+  scopes?: string[];
+  scopeNicks?: string[];
   success: (res: BridgeResponse) => void;
   fail: (res: BridgeResponse) => void;
+};
+
+type BridgeCaller = {
+  call: (method: string, options: BridgeCallOptions) => unknown;
 };
 
 type TokaAuthData = {
@@ -139,6 +144,15 @@ function getBridgeCaller() {
   }
 
   return null;
+}
+
+function isPromiseLike(value: unknown): value is Promise<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
 }
 
 function extractAuthCode(response: BridgeResponse) {
@@ -293,7 +307,7 @@ export default function AuthCodeGenerator() {
       }, 12000);
 
       try {
-        const bridge = getBridgeCaller();
+        const bridge = getBridgeCaller() as BridgeCaller | null;
 
         if (!bridge) {
           const msg = "Bridge no disponible (AlipayJSBridge/my).";
@@ -307,42 +321,118 @@ export default function AuthCodeGenerator() {
           return;
         }
 
-        bridge.call(`getUser${method}AuthCode`, {
-          usage: "Toka — prueba de integración",
-          scopes,
-          success(res) {
-            if (requestTimeoutRef.current !== null) {
-              window.clearTimeout(requestTimeoutRef.current);
-              requestTimeoutRef.current = null;
+        let resolved = false;
+
+        const clearPendingTimeout = () => {
+          if (requestTimeoutRef.current !== null) {
+            window.clearTimeout(requestTimeoutRef.current);
+            requestTimeoutRef.current = null;
+          }
+        };
+
+        const handleSuccess = (res: BridgeResponse) => {
+          if (resolved) {
+            return;
+          }
+
+          resolved = true;
+          clearPendingTimeout();
+
+          const code = extractAuthCode(res);
+
+          if (!code) {
+            const msg = `Bridge sin authCode usable. Respuesta: ${JSON.stringify(res)}`;
+            setError(`Error en ${method}: no llegó authCode en success.`);
+            setLoadingId(null);
+            addLog("err", msg);
+            return;
+          }
+
+          setAuthCode(code);
+          setLoadingId(null);
+          addLog("ok", `[${method}] authCode: ${code.slice(0, 24)}...`);
+          void exchangeAuthCode(code);
+        };
+
+        const handleFail = (res: BridgeResponse) => {
+          if (resolved) {
+            return;
+          }
+
+          resolved = true;
+          clearPendingTimeout();
+
+          const msg = res.errorMessage ?? res.error ?? JSON.stringify(res);
+          setError(`Error en ${method}: ${msg}`);
+          setLoadingId(null);
+          addLog("err", `[${method}] fail: ${msg}`);
+        };
+
+        const methodCandidates = [`getUser${method}AuthCode`, `get${method}AuthCode`];
+
+        const runAttempt = (attemptIndex: number) => {
+          if (resolved) {
+            return;
+          }
+
+          if (attemptIndex >= 3) {
+            return;
+          }
+
+          const apiMethod = methodCandidates[Math.min(attemptIndex, methodCandidates.length - 1)];
+          const useScopeNicks = attemptIndex === 1;
+
+          addLog(
+            "info",
+            `Intento ${attemptIndex + 1}: ${apiMethod} con ${useScopeNicks ? "scopeNicks" : "scopes"}.`,
+          );
+
+          const options: BridgeCallOptions = {
+            usage: "Toka — prueba de integración",
+            success: handleSuccess,
+            fail: handleFail,
+            ...(useScopeNicks ? { scopeNicks: scopes } : { scopes }),
+          };
+
+          try {
+            const maybeResult = bridge.call(apiMethod, options);
+
+            if (isPromiseLike(maybeResult)) {
+              void maybeResult
+                .then((value) => {
+                  if (!resolved && typeof value === "object" && value !== null) {
+                    handleSuccess(value as BridgeResponse);
+                  }
+                })
+                .catch((caughtError) => {
+                  if (!resolved) {
+                    const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
+                    handleFail({ errorMessage: msg });
+                  }
+                });
             }
 
-            const code = extractAuthCode(res);
+            if (attemptIndex < 2) {
+              window.setTimeout(() => {
+                if (!resolved) {
+                  runAttempt(attemptIndex + 1);
+                }
+              }, 3500);
+            }
+          } catch (caughtError) {
+            const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
+            addLog("err", `Excepción al invocar ${apiMethod}: ${msg}`);
 
-            if (!code) {
-              const msg = `Bridge sin authCode usable. Respuesta: ${JSON.stringify(res)}`;
-              setError(`Error en ${method}: no llegó authCode en success.`);
-              setLoadingId(null);
-              addLog("err", msg);
+            if (attemptIndex < 2) {
+              runAttempt(attemptIndex + 1);
               return;
             }
 
-            setAuthCode(code);
-            setLoadingId(null);
-            addLog("ok", `[${method}] authCode: ${code.slice(0, 24)}...`);
-            void exchangeAuthCode(code);
-          },
-          fail(res) {
-            if (requestTimeoutRef.current !== null) {
-              window.clearTimeout(requestTimeoutRef.current);
-              requestTimeoutRef.current = null;
-            }
+            handleFail({ errorMessage: msg });
+          }
+        };
 
-            const msg = res.errorMessage ?? res.error ?? JSON.stringify(res);
-            setError(`Error en ${method}: ${msg}`);
-            setLoadingId(null);
-            addLog("err", `[${method}] fail: ${msg}`);
-          },
-        });
+        runAttempt(0);
       } catch (caughtError) {
         if (requestTimeoutRef.current !== null) {
           window.clearTimeout(requestTimeoutRef.current);
