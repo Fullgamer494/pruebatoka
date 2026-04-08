@@ -106,13 +106,6 @@ const AUTH_METHODS: AuthMethod[] = [
       "USER_NATIONALITY",
     ],
   },
-  {
-    id: "kyc",
-    method: "KYCStatus",
-    label: "KYC Status",
-    icon: "✅",
-    scopes: ["USER_KYC_STATUS"],
-  },
 ];
 
 function getTimestamp() {
@@ -368,71 +361,39 @@ export default function AuthCodeGenerator() {
           addLog("err", `[${method}] fail: ${msg}`);
         };
 
-        const methodCandidates = [`getUser${method}AuthCode`, `get${method}AuthCode`];
+        const apiMethod = `getUser${method}AuthCode`;
 
-        const runAttempt = (attemptIndex: number) => {
-          if (resolved) {
-            return;
-          }
+        addLog("info", `Llamando ${apiMethod} con scopes: [${scopes.join(", ")}]`);
 
-          if (attemptIndex >= 3) {
-            return;
-          }
-
-          const apiMethod = methodCandidates[Math.min(attemptIndex, methodCandidates.length - 1)];
-          const useScopeNicks = attemptIndex === 1;
-
-          addLog(
-            "info",
-            `Intento ${attemptIndex + 1}: ${apiMethod} con ${useScopeNicks ? "scopeNicks" : "scopes"}.`,
-          );
-
-          const options: BridgeCallOptions = {
-            usage: "Toka — prueba de integración",
-            success: handleSuccess,
-            fail: handleFail,
-            ...(useScopeNicks ? { scopeNicks: scopes } : { scopes }),
-          };
-
-          try {
-            const maybeResult = bridge.call(apiMethod, options);
-
-            if (isPromiseLike(maybeResult)) {
-              void maybeResult
-                .then((value) => {
-                  if (!resolved && typeof value === "object" && value !== null) {
-                    handleSuccess(value as BridgeResponse);
-                  }
-                })
-                .catch((caughtError) => {
-                  if (!resolved) {
-                    const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
-                    handleFail({ errorMessage: msg });
-                  }
-                });
-            }
-
-            if (attemptIndex < 2) {
-              window.setTimeout(() => {
-                if (!resolved) {
-                  runAttempt(attemptIndex + 1);
-                }
-              }, 3500);
-            }
-          } catch (caughtError) {
-            const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
-            addLog("err", `Excepción al invocar ${apiMethod}: ${msg}`);
-
-            if (attemptIndex < 2) {
-              runAttempt(attemptIndex + 1);
-              return;
-            }
-
-            handleFail({ errorMessage: msg });
-          }
+        const options: BridgeCallOptions = {
+          usage: method,
+          scopes,
+          success: handleSuccess,
+          fail: handleFail,
         };
 
-        runAttempt(0);
+        try {
+          const maybeResult = bridge.call(apiMethod, options);
+
+          if (isPromiseLike(maybeResult)) {
+            void maybeResult
+              .then((value) => {
+                if (!resolved && typeof value === "object" && value !== null) {
+                  handleSuccess(value as BridgeResponse);
+                }
+              })
+              .catch((caughtError) => {
+                if (!resolved) {
+                  const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
+                  handleFail({ errorMessage: msg });
+                }
+              });
+          }
+        } catch (caughtError) {
+          const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
+          addLog("err", `Excepción al invocar ${apiMethod}: ${msg}`);
+          handleFail({ errorMessage: msg });
+        }
       } catch (caughtError) {
         if (requestTimeoutRef.current !== null) {
           window.clearTimeout(requestTimeoutRef.current);

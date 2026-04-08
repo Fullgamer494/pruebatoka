@@ -6,7 +6,7 @@ type TokaAuthenticateRequest = {
   auth_code?: string;
 };
 
-const DEFAULT_TOKA_BASE_URL = "https://talentland-toka.eastus2.cloudapp.azure.com";
+const DEFAULT_TOKA_BASE_URL = "http://talentland-toka.eastus2.cloudapp.azure.com";
 
 export async function POST(request: Request) {
   const appId = process.env.TOKA_APP_ID;
@@ -62,7 +62,7 @@ export async function POST(request: Request) {
         "Content-Type": "application/json",
         "X-App-Id": appId,
       },
-      body: JSON.stringify({ authcode, authCode: authcode }),
+      body: JSON.stringify({ authcode }),
     });
 
     const contentType = tokaResponse.headers.get("content-type") ?? "";
