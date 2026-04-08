@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 type TokaAuthenticateRequest = {
   authcode?: string;
   authCode?: string;
+  auth_code?: string;
 };
 
 const DEFAULT_TOKA_BASE_URL = "http://talentland-toka.eastus2.cloudapp.azure.com";
@@ -38,7 +39,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const authcode = body.authcode ?? body.authCode;
+  const authcode = body.authcode ?? body.authCode ?? body.auth_code;
 
   if (!authcode) {
     return NextResponse.json(
@@ -61,7 +62,7 @@ export async function POST(request: Request) {
         "Content-Type": "application/json",
         "X-App-Id": appId,
       },
-      body: JSON.stringify({ authcode }),
+      body: JSON.stringify({ authcode, authCode: authcode }),
     });
 
     const contentType = tokaResponse.headers.get("content-type") ?? "";

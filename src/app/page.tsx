@@ -18,7 +18,13 @@ type LogEntry = {
 
 type BridgeResponse = {
   authCode?: string;
+  authcode?: string;
   auth_code?: string;
+  data?: {
+    authCode?: string;
+    authcode?: string;
+    auth_code?: string;
+  };
   errorMessage?: string;
   error?: string;
   [key: string]: unknown;
@@ -106,6 +112,18 @@ function getTimestamp() {
 
 function isBridgeAvailable() {
   return typeof window !== "undefined" && typeof window.AlipayJSBridge !== "undefined";
+}
+
+function extractAuthCode(response: BridgeResponse) {
+  const candidate =
+    response.authCode ??
+    response.authcode ??
+    response.auth_code ??
+    response.data?.authCode ??
+    response.data?.authcode ??
+    response.data?.auth_code;
+
+  return typeof candidate === "string" ? candidate.trim() : "";
 }
 
 export default function AuthCodeGenerator() {
@@ -271,7 +289,16 @@ export default function AuthCodeGenerator() {
               requestTimeoutRef.current = null;
             }
 
-            const code = res.authCode ?? res.auth_code ?? JSON.stringify(res);
+            const code = extractAuthCode(res);
+
+            if (!code) {
+              const msg = `Bridge sin authCode usable. Respuesta: ${JSON.stringify(res)}`;
+              setError(`Error en ${method}: no llegó authCode en success.`);
+              setLoadingId(null);
+              addLog("err", msg);
+              return;
+            }
+
             setAuthCode(code);
             setLoadingId(null);
             addLog("ok", `[${method}] authCode: ${code.slice(0, 24)}...`);
