@@ -1,5 +1,6 @@
 "use client";
 
+import Script from "next/script";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type AuthMethod = {
@@ -57,6 +58,9 @@ declare global {
     AlipayJSBridge?: {
       call: (method: string, options: BridgeCallOptions) => void;
     };
+    my?: {
+      call: (method: string, options: BridgeCallOptions) => void;
+    };
   }
 }
 
@@ -111,7 +115,30 @@ function getTimestamp() {
 }
 
 function isBridgeAvailable() {
-  return typeof window !== "undefined" && typeof window.AlipayJSBridge !== "undefined";
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return (
+    typeof window.AlipayJSBridge?.call === "function" ||
+    typeof window.my?.call === "function"
+  );
+}
+
+function getBridgeCaller() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  if (typeof window.AlipayJSBridge?.call === "function") {
+    return window.AlipayJSBridge;
+  }
+
+  if (typeof window.my?.call === "function") {
+    return window.my;
+  }
+
+  return null;
 }
 
 function extractAuthCode(response: BridgeResponse) {
@@ -266,10 +293,10 @@ export default function AuthCodeGenerator() {
       }, 12000);
 
       try {
-        const bridge = window.AlipayJSBridge;
+        const bridge = getBridgeCaller();
 
         if (!bridge) {
-          const msg = "AlipayJSBridge no disponible en este entorno.";
+          const msg = "Bridge no disponible (AlipayJSBridge/my).";
           setError(msg);
           setLoadingId(null);
           if (requestTimeoutRef.current !== null) {
@@ -343,6 +370,13 @@ export default function AuthCodeGenerator() {
 
   return (
     <div style={styles.page}>
+      <Script
+        src="https://cdn.marmot-cloud.com/npm/hylid-bridge/2.10.0/index.js"
+        strategy="afterInteractive"
+        onLoad={() => addLog("ok", "SDK hylid-bridge cargado ✓")}
+        onError={() => addLog("err", "No se pudo cargar SDK hylid-bridge")}
+      />
+
       <div style={styles.header}>
         <h1 style={styles.title}>🔑 AuthCode Generator</h1>
         <p style={styles.subtitle}>
