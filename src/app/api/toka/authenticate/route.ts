@@ -9,19 +9,7 @@ type TokaAuthenticateRequest = {
 const DEFAULT_TOKA_BASE_URL = "http://talentland-toka.eastus2.cloudapp.azure.com";
 
 export async function POST(request: Request) {
-  const appId = process.env.TOKA_APP_ID;
-
-  if (!appId) {
-    return NextResponse.json(
-      {
-        success: false,
-        statusCode: 500,
-        message: "Missing TOKA_APP_ID environment variable.",
-        data: null,
-      },
-      { status: 500 },
-    );
-  }
+  const appId = process.env.TOKA_APP_ID || "3500020265479238";
 
   let body: TokaAuthenticateRequest;
 

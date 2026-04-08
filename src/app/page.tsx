@@ -52,11 +52,17 @@ export default function Home() {
     addLog("Llamando a getUserDigitalIdentityAuthCode...");
 
     // Se inyecta obligatoriamente el appId para H5 y se lee el código desde res.result
+    // En H5, el callback de éxito/falla siempre debe enviarse como 3er parámetro a la función call
+    // a diferencia de en Nativo donde va adentro del objeto
     bridge.call('getUserDigitalIdentityAuthCode', {
       appId: process.env.NEXT_PUBLIC_TOKA_APP_ID || '3500020265479238',
       usage: 'Autenticación inicial de la Mini App',
-      scopes: ['USER_ID', 'USER_AVATAR', 'USER_NICKNAME'],
-      success: (res: any) => {
+      scopes: ['USER_ID', 'USER_AVATAR', 'USER_NICKNAME']
+    }, (res: any) => {
+      // Validamos si la respuesta vino con un error
+      if (res.error || res.errorMessage || (res.resultCode && res.resultCode !== 10000)) {
+        addLog(`Fail - Error: ${JSON.stringify(res)}`);
+      } else {
         addLog(`Success - Respuesta: ${JSON.stringify(res)}`);
         
         // En Toka H5, el código viene en la propiedad "result" en lugar de "authCode"
@@ -67,9 +73,6 @@ export default function Home() {
         } else {
           addLog("AuthCode no encontrado en la respuesta (res.result está vacío).");
         }
-      },
-      fail: (res: any) => {
-        addLog(`Fail - Error: ${JSON.stringify(res)}`);
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
