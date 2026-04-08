@@ -3,13 +3,7 @@
 import Script from "next/script";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type AuthMethod = {
-  id: string;
-  method: string;
-  label: string;
-  icon: string;
-  scopes: string[];
-};
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type LogEntry = {
   type: "ok" | "err" | "info";
@@ -34,13 +28,8 @@ type BridgeResponse = {
 type BridgeCallOptions = {
   usage: string;
   scopes?: string[];
-  scopeNicks?: string[];
   success: (res: BridgeResponse) => void;
   fail: (res: BridgeResponse) => void;
-};
-
-type BridgeCaller = {
-  call: (method: string, options: BridgeCallOptions) => unknown;
 };
 
 type TokaAuthData = {
@@ -49,13 +38,6 @@ type TokaAuthData = {
   tokenType: string;
   expiresIn: number;
   [key: string]: unknown;
-};
-
-type TokaAuthenticateResponse = {
-  success: boolean;
-  statusCode: number;
-  message: string;
-  data?: TokaAuthData | null;
 };
 
 declare global {
@@ -69,32 +51,38 @@ declare global {
   }
 }
 
-const AUTH_METHODS: AuthMethod[] = [
-  {
-    id: "digital",
-    method: "DigitalIdentity",
-    label: "Digital Identity",
-    icon: "🪪",
-    scopes: ["USER_ID", "USER_AVATAR", "USER_NICKNAME"],
-  },
+// ─── Extra scopes (on-demand, requieren consentimiento del usuario) ────────────
+
+type ExtraScope = {
+  id: string;
+  method: string;
+  label: string;
+  icon: string;
+  scopes: string[];
+  description: string;
+};
+
+const EXTRA_SCOPES: ExtraScope[] = [
   {
     id: "contact",
     method: "ContactInformation",
-    label: "Contact Information",
+    label: "Información de contacto",
     icon: "📱",
     scopes: ["PLAINTEXT_MOBILE_PHONE", "PLAINTEXT_EMAIL_ADDRESS"],
+    description: "Teléfono y correo electrónico",
   },
   {
     id: "address",
     method: "AddressInformation",
-    label: "Address Information",
+    label: "Dirección",
     icon: "📍",
     scopes: ["USER_ADDRESS"],
+    description: "Dirección del usuario",
   },
   {
     id: "personal",
     method: "PersonalInformation",
-    label: "Personal Information",
+    label: "Datos personales",
     icon: "👤",
     scopes: [
       "USER_NAME",
@@ -102,489 +90,436 @@ const AUTH_METHODS: AuthMethod[] = [
       "USER_SECOND_SURNAME",
       "USER_GENDER",
       "USER_BIRTHDAY",
-      "USER_STATE_OF_BIRTH",
-      "USER_NATIONALITY",
     ],
+    description: "Nombre completo, género y fecha de nacimiento",
   },
 ];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getTimestamp() {
   return new Date().toLocaleTimeString("es-MX", { hour12: false });
 }
 
 function isBridgeAvailable() {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
+  if (typeof window === "undefined") return false;
   return (
     typeof window.AlipayJSBridge?.call === "function" ||
     typeof window.my?.call === "function"
   );
 }
 
-function getBridgeCaller() {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  if (typeof window.AlipayJSBridge?.call === "function") {
+function getBridge() {
+  if (typeof window === "undefined") return null;
+  if (typeof window.AlipayJSBridge?.call === "function")
     return window.AlipayJSBridge;
-  }
-
-  if (typeof window.my?.call === "function") {
-    return window.my;
-  }
-
+  if (typeof window.my?.call === "function") return window.my;
   return null;
 }
 
-function isPromiseLike(value: unknown): value is Promise<unknown> {
+function extractAuthCode(res: BridgeResponse): string {
+  const code =
+    res.authCode ??
+    res.authcode ??
+    res.auth_code ??
+    res.data?.authCode ??
+    res.data?.authcode ??
+    res.data?.auth_code;
+  return typeof code === "string" ? code.trim() : "";
+}
+
+function isPromiseLike(v: unknown): v is Promise<unknown> {
   return (
-    typeof value === "object" &&
-    value !== null &&
-    "then" in value &&
-    typeof (value as { then?: unknown }).then === "function"
+    typeof v === "object" &&
+    v !== null &&
+    "then" in v &&
+    typeof (v as { then?: unknown }).then === "function"
   );
 }
 
-function extractAuthCode(response: BridgeResponse) {
-  const candidate =
-    response.authCode ??
-    response.authcode ??
-    response.auth_code ??
-    response.data?.authCode ??
-    response.data?.authcode ??
-    response.data?.auth_code;
+// ─── Main component ───────────────────────────────────────────────────────────
 
-  return typeof candidate === "string" ? candidate.trim() : "";
-}
+type AuthState =
+  | { status: "idle" }
+  | { status: "waiting-bridge" }
+  | { status: "authenticating" }
+  | { status: "authenticated"; session: TokaAuthData; authCode: string }
+  | { status: "error"; message: string };
 
-export default function AuthCodeGenerator() {
-  const [bridgeReady, setBridgeReady] = useState(() => isBridgeAvailable());
-  const [authCode, setAuthCode] = useState("");
-  const [error, setError] = useState("");
-  const [loadingId, setLoadingId] = useState<string | null>(null);
-  const [exchangeLoading, setExchangeLoading] = useState(false);
-  const [exchangeError, setExchangeError] = useState("");
-  const [exchangeMessage, setExchangeMessage] = useState("");
-  const [exchangeData, setExchangeData] = useState<TokaAuthData | null>(null);
+export default function TokaApp() {
+  // Estado de sesión principal
+  const [authState, setAuthState] = useState<AuthState>({ status: "idle" });
+
+  // Auth codes extra obtenidos on-demand
+  const [extraCodes, setExtraCodes] = useState<Record<string, string>>({});
+  const [extraLoading, setExtraLoading] = useState<string | null>(null);
+  const [extraError, setExtraError] = useState<Record<string, string>>({});
+
   const [copied, setCopied] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>(() => [
-    { type: "info", msg: "Buscando AlipayJSBridge...", time: getTimestamp() },
-  ]);
-  const requestTimeoutRef = useRef<number | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const loginAttempted = useRef(false);
 
   const addLog = useCallback((type: LogEntry["type"], msg: string) => {
-    setLogs((prev) => [{ type, msg, time: getTimestamp() }, ...prev].slice(0, 50));
+    setLogs((prev) => [{ type, msg, time: getTimestamp() }, ...prev].slice(0, 60));
   }, []);
 
+  // ── Intercambia el authCode con Toka y guarda la sesión ─────────────────────
   const exchangeAuthCode = useCallback(
-    async (code: string) => {
-      setExchangeLoading(true);
-      setExchangeError("");
-      setExchangeMessage("Canjeando authCode en Toka...");
-      setExchangeData(null);
-      addLog("info", "POST /api/toka/authenticate");
+    async (code: string): Promise<TokaAuthData | null> => {
+      setAuthState({ status: "authenticating" });
+      addLog("info", "POST /api/toka/authenticate → canjeando authCode...");
 
       try {
-        const response = await fetch("/api/toka/authenticate", {
+        const res = await fetch("/api/toka/authenticate", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ authcode: code }),
         });
+        const payload = await res.json();
 
-        const payload = (await response.json()) as TokaAuthenticateResponse;
-
-        if (!response.ok || !payload.success || !payload.data?.accessToken) {
-          const message = payload.message || `Toka respondió con status ${response.status}`;
-          setExchangeError(message);
-          setExchangeMessage("No fue posible canjear el authCode.");
-          addLog("err", message);
-          return;
+        if (!res.ok || !payload?.data?.accessToken) {
+          throw new Error(payload?.message ?? `HTTP ${res.status}`);
         }
 
-        setExchangeData(payload.data);
-        setExchangeMessage(payload.message || "Authentication successful.");
-        addLog("ok", `JWT recibido para userId ${payload.data.userId}`);
-      } catch (caughtError) {
-        const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
-        setExchangeError(message);
-        setExchangeMessage("Error al consumir la API de Toka.");
-        addLog("err", `Error en authenticate: ${message}`);
-      } finally {
-        setExchangeLoading(false);
+        addLog("ok", `Sesión iniciada — userId: ${payload.data.userId}`);
+        return payload.data as TokaAuthData;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        addLog("err", `Error al canjear authCode: ${msg}`);
+        return null;
       }
     },
     [addLog],
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    let reportedReady = false;
-
-    const markReady = (message: string) => {
-      if (cancelled || reportedReady) {
-        return;
-      }
-
-      reportedReady = true;
-      setBridgeReady(true);
-      addLog("ok", message);
-    };
-
-    queueMicrotask(() => {
-      if (isBridgeAvailable()) {
-        markReady("AlipayJSBridge detectado ✓ — listo para usar");
-      }
-    });
-
-    const onBridgeReady = () => markReady("AlipayJSBridgeReady event recibido ✓");
-    document.addEventListener("AlipayJSBridgeReady", onBridgeReady);
-
-    const pollId = window.setInterval(() => {
-      if (isBridgeAvailable()) {
-        markReady("AlipayJSBridge detectado por polling ✓");
-      }
-    }, 300);
-
-    const warningId = window.setTimeout(() => {
-      if (!cancelled && !reportedReady) {
-        addLog(
-          "err",
-          "Sigue sin aparecer AlipayJSBridge. Si estás en Toka, recarga la vista o revisa que el bridge esté expuesto.",
-        );
-      }
-    }, 8000);
-
-    return () => {
-      cancelled = true;
-      document.removeEventListener("AlipayJSBridgeReady", onBridgeReady);
-      window.clearInterval(pollId);
-      window.clearTimeout(warningId);
-    };
-  }, [addLog]);
-
-  const callMethod = useCallback(
-    ({ method, scopes, id }: AuthMethod) => {
-      if (requestTimeoutRef.current !== null) {
-        window.clearTimeout(requestTimeoutRef.current);
-        requestTimeoutRef.current = null;
-      }
-
-      if (!isBridgeAvailable()) {
-        const msg =
-          "AlipayJSBridge no disponible. Abre esta página desde el WebView de Toka.";
-        setError(msg);
-        setAuthCode("");
-        addLog("err", msg);
-        return;
-      }
-
-      setLoadingId(id);
-      setError("");
-      setAuthCode("");
-      setExchangeError("");
-      setExchangeMessage("");
-      setExchangeData(null);
-      addLog("info", `Llamando getUser${method}AuthCode...`);
-
-      requestTimeoutRef.current = window.setTimeout(() => {
-        requestTimeoutRef.current = null;
-        setLoadingId(null);
-        const msg = `Timeout: el bridge no respondió con success/fail para ${method}.`;
-        setError(msg);
-        addLog("err", msg);
-      }, 12000);
-
-      try {
-        const bridge = getBridgeCaller() as BridgeCaller | null;
-
+  // ── Llama un JSAPI del bridge ────────────────────────────────────────────────
+  const callBridge = useCallback(
+    (method: string, scopes: string[]): Promise<string> => {
+      return new Promise((resolve, reject) => {
+        const bridge = getBridge();
         if (!bridge) {
-          const msg = "Bridge no disponible (AlipayJSBridge/my).";
-          setError(msg);
-          setLoadingId(null);
-          if (requestTimeoutRef.current !== null) {
-            window.clearTimeout(requestTimeoutRef.current);
-            requestTimeoutRef.current = null;
-          }
-          addLog("err", msg);
+          reject(new Error("AlipayJSBridge no disponible"));
           return;
         }
 
-        let resolved = false;
-
-        const clearPendingTimeout = () => {
-          if (requestTimeoutRef.current !== null) {
-            window.clearTimeout(requestTimeoutRef.current);
-            requestTimeoutRef.current = null;
-          }
-        };
-
-        const handleSuccess = (res: BridgeResponse) => {
-          if (resolved) {
-            return;
-          }
-
-          resolved = true;
-          clearPendingTimeout();
-
-          const code = extractAuthCode(res);
-
-          if (!code) {
-            const msg = `Bridge sin authCode usable. Respuesta: ${JSON.stringify(res)}`;
-            setError(`Error en ${method}: no llegó authCode en success.`);
-            setLoadingId(null);
-            addLog("err", msg);
-            return;
-          }
-
-          setAuthCode(code);
-          setLoadingId(null);
-          addLog("ok", `[${method}] authCode: ${code.slice(0, 24)}...`);
-          void exchangeAuthCode(code);
-        };
-
-        const handleFail = (res: BridgeResponse) => {
-          if (resolved) {
-            return;
-          }
-
-          resolved = true;
-          clearPendingTimeout();
-
-          const msg = res.errorMessage ?? res.error ?? JSON.stringify(res);
-          setError(`Error en ${method}: ${msg}`);
-          setLoadingId(null);
-          addLog("err", `[${method}] fail: ${msg}`);
-        };
-
         const apiMethod = `getUser${method}AuthCode`;
+        addLog("info", `Llamando ${apiMethod}...`);
 
-        addLog("info", `Llamando ${apiMethod} con scopes: [${scopes.join(", ")}]`);
+        const timeout = window.setTimeout(() => {
+          reject(new Error(`Timeout esperando respuesta de ${apiMethod}`));
+        }, 12000);
 
-        const options: BridgeCallOptions = {
-          usage: method,
-          scopes,
-          success: handleSuccess,
-          fail: handleFail,
+        const done = (code?: string, errMsg?: string) => {
+          window.clearTimeout(timeout);
+          if (code) resolve(code);
+          else reject(new Error(errMsg ?? "Sin authCode en respuesta"));
         };
 
         try {
-          const maybeResult = bridge.call(apiMethod, options);
+          const result = bridge.call(apiMethod, {
+            usage: method,
+            scopes,
+            success: (res) => {
+              const code = extractAuthCode(res);
+              if (code) done(code);
+              else done(undefined, `Respuesta sin authCode: ${JSON.stringify(res)}`);
+            },
+            fail: (res) => {
+              done(undefined, res.errorMessage ?? res.error ?? JSON.stringify(res));
+            },
+          });
 
-          if (isPromiseLike(maybeResult)) {
-            void maybeResult
-              .then((value) => {
-                if (!resolved && typeof value === "object" && value !== null) {
-                  handleSuccess(value as BridgeResponse);
+          if (isPromiseLike(result)) {
+            result
+              .then((v) => {
+                if (typeof v === "object" && v !== null) {
+                  const code = extractAuthCode(v as BridgeResponse);
+                  if (code) done(code);
                 }
               })
-              .catch((caughtError) => {
-                if (!resolved) {
-                  const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
-                  handleFail({ errorMessage: msg });
-                }
+              .catch((e) => {
+                done(undefined, e instanceof Error ? e.message : String(e));
               });
           }
-        } catch (caughtError) {
-          const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
-          addLog("err", `Excepción al invocar ${apiMethod}: ${msg}`);
-          handleFail({ errorMessage: msg });
+        } catch (e) {
+          done(undefined, e instanceof Error ? e.message : String(e));
         }
-      } catch (caughtError) {
-        if (requestTimeoutRef.current !== null) {
-          window.clearTimeout(requestTimeoutRef.current);
-          requestTimeoutRef.current = null;
-        }
-
-        const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
-        setError(`Excepción: ${msg}`);
-        setLoadingId(null);
-        addLog("err", `Excepción: ${msg}`);
-      }
+      });
     },
-    [addLog, exchangeAuthCode],
+    [addLog],
   );
 
-  const copyCode = useCallback(async () => {
-    if (!authCode) {
+  // ── LOGIN AUTOMÁTICO al montar — Digital Identity (USER_ID) ─────────────────
+  const doAutoLogin = useCallback(async () => {
+    if (loginAttempted.current) return;
+    loginAttempted.current = true;
+
+    if (!isBridgeAvailable()) {
+      setAuthState({ status: "waiting-bridge" });
+      addLog(
+        "info",
+        "Bridge no detectado aún. Esperando AlipayJSBridgeReady...",
+      );
       return;
     }
 
-    await navigator.clipboard.writeText(authCode);
+    addLog("ok", "AlipayJSBridge detectado ✓ — iniciando autenticación...");
+
+    try {
+      const code = await callBridge("DigitalIdentity", [
+        "USER_ID",
+        "USER_AVATAR",
+        "USER_NICKNAME",
+      ]);
+
+      addLog("ok", `DigitalIdentity authCode obtenido ✓`);
+      const session = await exchangeAuthCode(code);
+
+      if (session) {
+        setAuthState({ status: "authenticated", session, authCode: code });
+      } else {
+        setAuthState({
+          status: "error",
+          message: "No se pudo intercambiar el authCode. Revisa el log.",
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAuthState({ status: "error", message: msg });
+      addLog("err", `Login automático falló: ${msg}`);
+    }
+  }, [addLog, callBridge, exchangeAuthCode]);
+
+  // ── Escucha el bridge y dispara login ────────────────────────────────────────
+  useEffect(() => {
+    // Intento inmediato (ya podría estar listo)
+    queueMicrotask(() => void doAutoLogin());
+
+    // Evento estándar de Alipay
+    const onReady = () => {
+      addLog("ok", "AlipayJSBridgeReady event recibido ✓");
+      void doAutoLogin();
+    };
+    document.addEventListener("AlipayJSBridgeReady", onReady);
+
+    // Polling de fallback por si el evento no llega
+    const poll = window.setInterval(() => {
+      if (isBridgeAvailable() && authState.status === "waiting-bridge") {
+        void doAutoLogin();
+      }
+    }, 500);
+
+    return () => {
+      document.removeEventListener("AlipayJSBridgeReady", onReady);
+      window.clearInterval(poll);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Solicitar scope extra on-demand ──────────────────────────────────────────
+  const requestExtraScope = useCallback(
+    async (scope: ExtraScope) => {
+      if (authState.status !== "authenticated") return;
+      setExtraLoading(scope.id);
+      setExtraError((prev) => ({ ...prev, [scope.id]: "" }));
+
+      try {
+        const code = await callBridge(scope.method, scope.scopes);
+        setExtraCodes((prev) => ({ ...prev, [scope.id]: code }));
+        addLog("ok", `[${scope.method}] authCode obtenido ✓`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setExtraError((prev) => ({ ...prev, [scope.id]: msg }));
+        addLog("err", `[${scope.method}] falló: ${msg}`);
+      } finally {
+        setExtraLoading(null);
+      }
+    },
+    [authState, callBridge, addLog],
+  );
+
+  const copyText = useCallback(async (text: string) => {
+    await navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  }, [authCode]);
+  }, []);
+
+  // ─── Render ─────────────────────────────────────────────────────────────────
+
+  const isAuthenticated = authState.status === "authenticated";
+  const session = isAuthenticated ? authState.session : null;
 
   return (
-    <div style={styles.page}>
+    <div style={s.page}>
       <Script
         src="https://cdn.marmot-cloud.com/npm/hylid-bridge/2.10.0/index.js"
         strategy="afterInteractive"
         onLoad={() => addLog("ok", "SDK hylid-bridge cargado ✓")}
-        onError={() => addLog("err", "No se pudo cargar SDK hylid-bridge")}
+        onError={() => addLog("err", "No se pudo cargar hylid-bridge SDK")}
       />
 
-      <div style={styles.header}>
-        <h1 style={styles.title}>🔑 AuthCode Generator</h1>
-        <p style={styles.subtitle}>
-          Llama los JSAPIs de Toka/Alipay directamente desde el bridge del WebView.
+      {/* Header */}
+      <div style={s.header}>
+        <h1 style={s.title}>🔑 Toka Auth</h1>
+        <p style={s.subtitle}>
+          Autenticación automática via AlipayJSBridge al abrir la mini app.
         </p>
-        <span
-          style={{
-            ...styles.badge,
-            ...(bridgeReady ? styles.badgeReady : styles.badgeWait),
-          }}
-        >
-          <span
-            style={{
-              ...styles.dot,
-              background: bridgeReady ? "#5eead4" : "#f59e0b",
-            }}
-          />
-          {bridgeReady ? "AlipayJSBridge listo" : "Esperando bridge..."}
-        </span>
       </div>
 
+      {/* Sesión principal */}
       <div
         style={{
-          ...styles.resultBox,
-          borderColor: authCode ? "#5eead4" : error ? "#ef4444" : "#2a2d3e",
+          ...s.card,
+          borderColor:
+            authState.status === "authenticated"
+              ? "#5eead480"
+              : authState.status === "error"
+                ? "#ef444480"
+                : authState.status === "authenticating"
+                  ? "#7c6df080"
+                  : "#2a2d3e",
         }}
       >
-        <div style={styles.resultLabel}>
-          <span>AuthCode</span>
-          {authCode ? (
-            <button
-              style={{ ...styles.copyBtn, ...(copied ? styles.copyBtnDone : {}) }}
-              onClick={copyCode}
-            >
-              {copied ? "✅ Copiado" : "📋 Copiar"}
-            </button>
-          ) : null}
+        <div style={s.cardLabel}>
+          <span>Sesión</span>
+          <StatusBadge status={authState.status} />
         </div>
-        {authCode ? (
-          <p style={styles.codeText}>{authCode}</p>
-        ) : error ? (
-          <p style={{ ...styles.codeText, color: "#ef4444", fontSize: 13 }}>✕ {error}</p>
-        ) : (
-          <p style={{ ...styles.codeText, color: "#64748b", fontFamily: "inherit", fontSize: 13 }}>
-            Selecciona un método abajo para obtener tu authCode →
+
+        {authState.status === "idle" && (
+          <p style={{ ...s.muted, marginTop: 8 }}>Iniciando...</p>
+        )}
+
+        {authState.status === "waiting-bridge" && (
+          <div style={{ marginTop: 8 }}>
+            <p style={{ ...s.muted, color: "#f59e0b" }}>
+              ⏳ Esperando AlipayJSBridge...
+            </p>
+            <p style={s.muted}>
+              Abre esta página desde el WebView de Toka para que el bridge esté
+              disponible.
+            </p>
+          </div>
+        )}
+
+        {authState.status === "authenticating" && (
+          <p style={{ ...s.muted, color: "#7c6df0", marginTop: 8 }}>
+            ⚡ Intercambiando authCode con{" "}
+            <code style={s.code}>/v1/user/authenticate</code>...
           </p>
         )}
-      </div>
 
-      <div
-        style={{
-          ...styles.resultBox,
-          borderColor: exchangeData ? "#5eead4" : exchangeError ? "#ef4444" : "#2a2d3e",
-        }}
-      >
-        <div style={styles.resultLabel}>
-          <span>JWT / userId</span>
-          <span style={{ color: exchangeLoading ? "#f59e0b" : "#64748b" }}>
-            {exchangeLoading ? "Canjeando..." : exchangeData ? "Listo" : "Pendiente"}
-          </span>
-        </div>
-        {exchangeLoading ? (
-          <p style={{ ...styles.codeText, color: "#f59e0b", fontFamily: "inherit", fontSize: 13 }}>
-            Canjeando authCode contra /v1/user/authenticate...
+        {authState.status === "error" && (
+          <p style={{ ...s.muted, color: "#ef4444", marginTop: 8 }}>
+            ✕ {authState.message}
           </p>
-        ) : exchangeData ? (
-          <div style={{ display: "grid", gap: 10 }}>
-            <div style={styles.metaGrid}>
-              <div>
-                <div style={styles.metaLabel}>User ID</div>
-                <div style={styles.metaValue}>{exchangeData.userId}</div>
-              </div>
-              <div>
-                <div style={styles.metaLabel}>Token type</div>
-                <div style={styles.metaValue}>{exchangeData.tokenType}</div>
-              </div>
-              <div>
-                <div style={styles.metaLabel}>Expires in</div>
-                <div style={styles.metaValue}>{exchangeData.expiresIn}s</div>
-              </div>
+        )}
+
+        {authState.status === "authenticated" && session && (
+          <div style={{ marginTop: 10, display: "grid", gap: 12 }}>
+            <div style={s.metaGrid}>
+              <MetaItem label="User ID" value={session.userId} />
+              <MetaItem label="Token type" value={session.tokenType} />
+              <MetaItem label="Expira en" value={`${session.expiresIn}s`} />
             </div>
             <div>
-              <div style={styles.metaLabel}>Access token</div>
-              <p style={styles.codeText}>{exchangeData.accessToken}</p>
-            </div>
-            <div>
-              <div style={styles.metaLabel}>Message</div>
-              <p style={{ ...styles.codeText, color: "#e2e8f0", fontFamily: "inherit", fontSize: 13 }}>
-                {exchangeMessage || "Authentication successful."}
-              </p>
+              <div style={s.metaLabel}>Access Token (JWT)</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                <p style={{ ...s.codeText, flex: 1 }}>{session.accessToken}</p>
+                <button
+                  style={{ ...s.copyBtn, ...(copied ? s.copyBtnDone : {}) }}
+                  onClick={() => copyText(session.accessToken)}
+                >
+                  {copied ? "✅" : "📋"}
+                </button>
+              </div>
             </div>
           </div>
-        ) : exchangeError ? (
-          <p style={{ ...styles.codeText, color: "#ef4444", fontSize: 13 }}>✕ {exchangeError}</p>
-        ) : (
-          <p style={{ ...styles.codeText, color: "#64748b", fontFamily: "inherit", fontSize: 13 }}>
-            Aquí aparecerá la respuesta de <code>/v1/user/authenticate</code> cuando llegue el authCode.
-          </p>
         )}
       </div>
 
-      <div style={styles.methods}>
-        {AUTH_METHODS.map((item) => (
-          <button
-            key={item.id}
-            style={{
-              ...styles.card,
-              ...(loadingId === item.id ? styles.cardLoading : {}),
-            }}
-            onClick={() => callMethod(item)}
-            disabled={loadingId !== null}
-          >
-            <span style={{ fontSize: 22 }}>{item.icon}</span>
-            <div style={{ flex: 1, textAlign: "left" }}>
-              <div style={styles.cardName}>
-                getUser<strong>{item.method}</strong>AuthCode
+      {/* Scopes extra — solo si ya está autenticado */}
+      {isAuthenticated && (
+        <div style={{ width: "100%", maxWidth: 600 }}>
+          <div style={{ ...s.metaLabel, marginBottom: 10 }}>
+            DATOS ADICIONALES (ON-DEMAND)
+          </div>
+          <p style={{ ...s.muted, marginBottom: 14, fontSize: 12 }}>
+            Estos datos requieren consentimiento explícito del usuario. Solicítalos
+            solo cuando los necesites.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {EXTRA_SCOPES.map((scope) => (
+              <div key={scope.id} style={s.scopeCard}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontSize: 20 }}>{scope.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={s.scopeLabel}>{scope.label}</div>
+                    <div style={s.scopeDesc}>{scope.description}</div>
+                  </div>
+                  {extraCodes[scope.id] ? (
+                    <span style={{ color: "#22c55e", fontSize: 12 }}>✓ Obtenido</span>
+                  ) : (
+                    <button
+                      style={{
+                        ...s.requestBtn,
+                        opacity: extraLoading === scope.id ? 0.6 : 1,
+                      }}
+                      onClick={() => void requestExtraScope(scope)}
+                      disabled={extraLoading !== null}
+                    >
+                      {extraLoading === scope.id ? (
+                        <span style={s.spinner} />
+                      ) : (
+                        "Solicitar"
+                      )}
+                    </button>
+                  )}
+                </div>
+
+                {extraCodes[scope.id] && (
+                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #2a2d3e" }}>
+                    <div style={s.metaLabel}>authCode</div>
+                    <p style={s.codeText}>{extraCodes[scope.id]}</p>
+                  </div>
+                )}
+
+                {extraError[scope.id] && (
+                  <p style={{ ...s.muted, color: "#ef4444", marginTop: 8, fontSize: 11 }}>
+                    ✕ {extraError[scope.id]}
+                  </p>
+                )}
               </div>
-              <div style={styles.cardScopes}>{item.scopes.join(" · ")}</div>
-            </div>
-            {loadingId === item.id ? (
-              <span style={styles.spinner} />
-            ) : (
-              <span style={{ color: "#64748b", fontSize: 20 }}>›</span>
-            )}
-          </button>
-        ))}
-      </div>
+            ))}
+          </div>
+        </div>
+      )}
 
-      <div style={styles.warning}>
-        <strong>⚠️ Solo funciona dentro del WebView de Toka</strong>
-        <br />
-        En un navegador normal, <code>AlipayJSBridge</code> no estará disponible. Si el estado se
-        queda esperando, recarga la vista de Toka y confirma que el bridge esté expuesto.
-      </div>
-
-      <div style={styles.logSection}>
-        <div style={styles.logTitle}>Log de llamadas</div>
-        <div style={styles.logBox}>
+      {/* Log */}
+      <div style={s.logSection}>
+        <div style={s.metaLabel}>LOG DE LLAMADAS</div>
+        <div style={s.logBox}>
           {logs.length === 0 ? (
-            <span style={{ color: "#64748b", fontStyle: "italic", fontSize: 11 }}>
+            <span style={{ color: "#64748b", fontStyle: "italic" }}>
               Sin actividad...
             </span>
           ) : (
-            logs.map((logEntry, index) => (
-              <div key={`${logEntry.time}-${index}`} style={{ display: "flex", gap: 8, lineHeight: 1.8 }}>
-                <span style={{ color: "#64748b", flexShrink: 0 }}>{logEntry.time}</span>
+            logs.map((l, i) => (
+              <div
+                key={`${l.time}-${i}`}
+                style={{ display: "flex", gap: 8, lineHeight: 1.8 }}
+              >
+                <span style={{ color: "#64748b", flexShrink: 0 }}>{l.time}</span>
                 <span
                   style={{
                     color:
-                      logEntry.type === "ok"
+                      l.type === "ok"
                         ? "#22c55e"
-                        : logEntry.type === "err"
+                        : l.type === "err"
                           ? "#ef4444"
                           : "#7c6df0",
                   }}
                 >
-                  {logEntry.msg}
+                  {l.msg}
                 </span>
               </div>
             ))
@@ -595,7 +530,47 @@ export default function AuthCodeGenerator() {
   );
 }
 
-const styles = {
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status: AuthState["status"] }) {
+  const map: Record<AuthState["status"], { label: string; color: string; bg: string }> = {
+    idle: { label: "Iniciando", color: "#64748b", bg: "rgba(100,116,139,.1)" },
+    "waiting-bridge": { label: "Esperando bridge", color: "#f59e0b", bg: "rgba(245,158,11,.1)" },
+    authenticating: { label: "Autenticando...", color: "#7c6df0", bg: "rgba(124,109,240,.1)" },
+    authenticated: { label: "Autenticado ✓", color: "#5eead4", bg: "rgba(94,234,212,.1)" },
+    error: { label: "Error", color: "#ef4444", bg: "rgba(239,68,68,.1)" },
+  };
+  const { label, color, bg } = map[status];
+  return (
+    <span
+      style={{
+        background: bg,
+        color,
+        border: `1px solid ${color}40`,
+        borderRadius: 20,
+        padding: "2px 10px",
+        fontSize: 11,
+        fontWeight: 600,
+        fontFamily: "monospace",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function MetaItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div style={s.metaLabel}>{label}</div>
+      <div style={{ fontSize: 13, color: "#e2e8f0", wordBreak: "break-word" }}>{value}</div>
+    </div>
+  );
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const s = {
   page: {
     background: "#0d0f14",
     color: "#e2e8f0",
@@ -605,55 +580,33 @@ const styles = {
     flexDirection: "column",
     alignItems: "center",
     padding: "40px 20px",
+    gap: 20,
   },
-  header: { textAlign: "center", marginBottom: 32 },
+  header: { textAlign: "center" },
   title: { fontSize: 24, fontWeight: 700, marginBottom: 6 },
-  subtitle: { fontSize: 14, color: "#64748b", maxWidth: 420, lineHeight: 1.6 },
-  badge: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    borderRadius: 20,
-    padding: "4px 12px",
-    fontSize: 11,
-    fontFamily: "monospace",
-    marginTop: 12,
-    border: "1px solid",
-  },
-  badgeReady: { background: "rgba(94,234,212,.1)", borderColor: "rgba(94,234,212,.3)", color: "#5eead4" },
-  badgeWait: { background: "rgba(245,158,11,.1)", borderColor: "rgba(245,158,11,.3)", color: "#f59e0b" },
-  dot: { width: 6, height: 6, borderRadius: "50%" },
-  resultBox: {
+  subtitle: { fontSize: 13, color: "#64748b", maxWidth: 420, lineHeight: 1.6 },
+  card: {
     width: "100%",
     maxWidth: 600,
     background: "#161820",
     border: "2px solid",
     borderRadius: 16,
     padding: "18px 20px",
-    marginBottom: 24,
     transition: "border-color .3s",
   },
-  resultLabel: {
+  cardLabel: {
     fontSize: 11,
     fontWeight: 600,
     color: "#64748b",
     textTransform: "uppercase",
     letterSpacing: ".8px",
-    marginBottom: 10,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
   },
-  codeText: {
-    fontFamily: "monospace",
-    fontSize: 15,
-    color: "#5eead4",
-    wordBreak: "break-all",
-    lineHeight: 1.6,
-  },
   metaGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
     gap: 12,
   },
   metaLabel: {
@@ -664,84 +617,82 @@ const styles = {
     letterSpacing: ".8px",
     marginBottom: 4,
   },
-  metaValue: {
+  codeText: {
+    fontFamily: "monospace",
+    fontSize: 12,
+    color: "#5eead4",
+    wordBreak: "break-all",
+    lineHeight: 1.6,
+    margin: 0,
+  },
+  code: {
+    fontFamily: "monospace",
+    fontSize: 12,
+    color: "#7c6df0",
+  },
+  muted: {
     fontSize: 13,
-    color: "#e2e8f0",
-    wordBreak: "break-word",
+    color: "#64748b",
+    lineHeight: 1.6,
+    margin: 0,
   },
   copyBtn: {
-    background: "rgba(94,234,212,.1)",
-    border: "1px solid rgba(94,234,212,.25)",
+    background: "rgba(94,234,212,.08)",
+    border: "1px solid rgba(94,234,212,.2)",
     color: "#5eead4",
     borderRadius: 6,
-    padding: "3px 10px",
-    fontSize: 11,
-    fontWeight: 600,
+    padding: "4px 10px",
+    fontSize: 13,
     cursor: "pointer",
+    flexShrink: 0,
   },
   copyBtnDone: {
     background: "rgba(34,197,94,.1)",
     borderColor: "rgba(34,197,94,.4)",
     color: "#22c55e",
   },
-  methods: { width: "100%", maxWidth: 600, display: "flex", flexDirection: "column", gap: 10 },
-  card: {
+  scopeCard: {
     background: "#161820",
     border: "1px solid #2a2d3e",
     borderRadius: 12,
-    padding: "14px 18px",
+    padding: "14px 16px",
+  },
+  scopeLabel: { fontSize: 14, fontWeight: 500, marginBottom: 2 },
+  scopeDesc: { fontSize: 11, color: "#64748b", fontFamily: "monospace" },
+  requestBtn: {
+    background: "rgba(124,109,240,.15)",
+    border: "1px solid rgba(124,109,240,.3)",
+    color: "#7c6df0",
+    borderRadius: 8,
+    padding: "6px 14px",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
     display: "flex",
     alignItems: "center",
-    gap: 14,
-    cursor: "pointer",
-    transition: "all .15s",
-    width: "100%",
-    color: "#e2e8f0",
-    fontFamily: "'Inter', sans-serif",
+    gap: 6,
+    flexShrink: 0,
   },
-  cardLoading: { borderColor: "#7c6df0", opacity: 0.8 },
-  cardName: { fontSize: 14, fontWeight: 500, marginBottom: 2 },
-  cardScopes: { fontSize: 11, color: "#64748b", fontFamily: "monospace", lineHeight: 1.5 },
   spinner: {
     display: "inline-block",
-    width: 18,
-    height: 18,
-    flexShrink: 0,
+    width: 14,
+    height: 14,
     border: "2px solid rgba(124,109,240,.2)",
     borderTopColor: "#7c6df0",
     borderRadius: "50%",
     animation: "spin .7s linear infinite",
   },
-  warning: {
-    width: "100%",
-    maxWidth: 600,
-    background: "rgba(245,158,11,.06)",
-    border: "1px solid rgba(245,158,11,.2)",
-    borderRadius: 10,
-    padding: "14px 16px",
-    fontSize: 12.5,
-    color: "#fbbf24",
-    lineHeight: 1.7,
-    marginTop: 20,
-  },
-  logSection: { width: "100%", maxWidth: 600, marginTop: 20 },
-  logTitle: {
-    fontSize: 11,
-    fontWeight: 600,
-    color: "#64748b",
-    textTransform: "uppercase",
-    letterSpacing: ".8px",
-    marginBottom: 8,
-  },
+  logSection: { width: "100%", maxWidth: 600 },
   logBox: {
     background: "#161820",
     border: "1px solid #2a2d3e",
     borderRadius: 10,
     padding: "12px 14px",
     fontFamily: "monospace",
-    fontSize: 11.5,
-    maxHeight: 180,
+    fontSize: 11,
+    maxHeight: 200,
     overflowY: "auto",
     lineHeight: 1.8,
+    marginTop: 8,
   },
 } as const;
