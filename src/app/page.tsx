@@ -1,7 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import Script from "next/script";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type AuthMethod = {
   id: string;
@@ -100,28 +99,68 @@ export default function AuthCodeGenerator() {
   const [error, setError] = useState("");
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>(() => [
+    { type: "info", msg: "Buscando AlipayJSBridge...", time: getTimestamp() },
+  ]);
+  const requestTimeoutRef = useRef<number | null>(null);
 
   const addLog = useCallback((type: LogEntry["type"], msg: string) => {
     setLogs((prev) => [{ type, msg, time: getTimestamp() }, ...prev].slice(0, 50));
   }, []);
 
-  const onSdkLoad = useCallback(() => {
-    if (isBridgeAvailable()) {
-      setBridgeReady(true);
-      addLog("ok", "AlipayJSBridge detectado ✓ — listo para usar");
-      return;
-    }
+  useEffect(() => {
+    let cancelled = false;
+    let reportedReady = false;
 
-    addLog("err", "AlipayJSBridge NO disponible en este entorno");
-    document.addEventListener("AlipayJSBridgeReady", () => {
+    const markReady = (message: string) => {
+      if (cancelled || reportedReady) {
+        return;
+      }
+
+      reportedReady = true;
       setBridgeReady(true);
-      addLog("ok", "AlipayJSBridgeReady event recibido ✓");
+      addLog("ok", message);
+    };
+
+    queueMicrotask(() => {
+      if (isBridgeAvailable()) {
+        markReady("AlipayJSBridge detectado ✓ — listo para usar");
+      }
     });
+
+    const onBridgeReady = () => markReady("AlipayJSBridgeReady event recibido ✓");
+    document.addEventListener("AlipayJSBridgeReady", onBridgeReady);
+
+    const pollId = window.setInterval(() => {
+      if (isBridgeAvailable()) {
+        markReady("AlipayJSBridge detectado por polling ✓");
+      }
+    }, 300);
+
+    const warningId = window.setTimeout(() => {
+      if (!cancelled && !reportedReady) {
+        addLog(
+          "err",
+          "Sigue sin aparecer AlipayJSBridge. Si estás en Toka, recarga la vista o revisa que el bridge esté expuesto.",
+        );
+      }
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener("AlipayJSBridgeReady", onBridgeReady);
+      window.clearInterval(pollId);
+      window.clearTimeout(warningId);
+    };
   }, [addLog]);
 
   const callMethod = useCallback(
     ({ method, scopes, id }: AuthMethod) => {
+      if (requestTimeoutRef.current !== null) {
+        window.clearTimeout(requestTimeoutRef.current);
+        requestTimeoutRef.current = null;
+      }
+
       if (!isBridgeAvailable()) {
         const msg =
           "AlipayJSBridge no disponible. Abre esta página desde el WebView de Toka.";
@@ -136,6 +175,14 @@ export default function AuthCodeGenerator() {
       setAuthCode("");
       addLog("info", `Llamando getUser${method}AuthCode...`);
 
+      requestTimeoutRef.current = window.setTimeout(() => {
+        requestTimeoutRef.current = null;
+        setLoadingId(null);
+        const msg = `Tiempo de espera agotado para ${method}. El bridge no respondió con success/fail.`;
+        setError(msg);
+        addLog("err", msg);
+      }, 12000);
+
       try {
         const bridge = window.AlipayJSBridge;
 
@@ -143,6 +190,10 @@ export default function AuthCodeGenerator() {
           const msg = "AlipayJSBridge no disponible en este entorno.";
           setError(msg);
           setLoadingId(null);
+          if (requestTimeoutRef.current !== null) {
+            window.clearTimeout(requestTimeoutRef.current);
+            requestTimeoutRef.current = null;
+          }
           addLog("err", msg);
           return;
         }
@@ -151,12 +202,22 @@ export default function AuthCodeGenerator() {
           usage: "Toka — prueba de integración",
           scopes,
           success(res) {
+            if (requestTimeoutRef.current !== null) {
+              window.clearTimeout(requestTimeoutRef.current);
+              requestTimeoutRef.current = null;
+            }
+
             const code = res.authCode ?? res.auth_code ?? JSON.stringify(res);
             setAuthCode(code);
             setLoadingId(null);
             addLog("ok", `[${method}] authCode: ${code.slice(0, 24)}...`);
           },
           fail(res) {
+            if (requestTimeoutRef.current !== null) {
+              window.clearTimeout(requestTimeoutRef.current);
+              requestTimeoutRef.current = null;
+            }
+
             const msg = res.errorMessage ?? res.error ?? JSON.stringify(res);
             setError(`Error en ${method}: ${msg}`);
             setLoadingId(null);
@@ -164,6 +225,11 @@ export default function AuthCodeGenerator() {
           },
         });
       } catch (caughtError) {
+        if (requestTimeoutRef.current !== null) {
+          window.clearTimeout(requestTimeoutRef.current);
+          requestTimeoutRef.current = null;
+        }
+
         const msg = caughtError instanceof Error ? caughtError.message : String(caughtError);
         setError(`Excepción: ${msg}`);
         setLoadingId(null);
@@ -184,128 +250,119 @@ export default function AuthCodeGenerator() {
   }, [authCode]);
 
   return (
-    <>
-      <Script
-        src="https://cdn.marmot-cloud.com/npm/hylid-bridge/2.10.0/index.js"
-        strategy="afterInteractive"
-        onLoad={onSdkLoad}
-        onError={() => addLog("err", "Error al cargar el SDK de hylid-bridge")}
-      />
-
-      <div style={styles.page}>
-        <div style={styles.header}>
-          <h1 style={styles.title}>🔑 AuthCode Generator</h1>
-          <p style={styles.subtitle}>
-            Llama los JSAPIs de Toka/Alipay con el SDK oficial desde un H5.
-          </p>
-          <span
-            style={{
-              ...styles.badge,
-              ...(bridgeReady ? styles.badgeReady : styles.badgeWait),
-            }}
-          >
-            <span
-              style={{
-                ...styles.dot,
-                background: bridgeReady ? "#5eead4" : "#f59e0b",
-              }}
-            />
-            {bridgeReady ? "AlipayJSBridge listo" : "Esperando bridge..."}
-          </span>
-        </div>
-
-        <div
+    <div style={styles.page}>
+      <div style={styles.header}>
+        <h1 style={styles.title}>🔑 AuthCode Generator</h1>
+        <p style={styles.subtitle}>
+          Llama los JSAPIs de Toka/Alipay directamente desde el bridge del WebView.
+        </p>
+        <span
           style={{
-            ...styles.resultBox,
-            borderColor: authCode ? "#5eead4" : error ? "#ef4444" : "#2a2d3e",
+            ...styles.badge,
+            ...(bridgeReady ? styles.badgeReady : styles.badgeWait),
           }}
         >
-          <div style={styles.resultLabel}>
-            <span>AuthCode</span>
-            {authCode ? (
-              <button
-                style={{ ...styles.copyBtn, ...(copied ? styles.copyBtnDone : {}) }}
-                onClick={copyCode}
-              >
-                {copied ? "✅ Copiado" : "📋 Copiar"}
-              </button>
-            ) : null}
-          </div>
+          <span
+            style={{
+              ...styles.dot,
+              background: bridgeReady ? "#5eead4" : "#f59e0b",
+            }}
+          />
+          {bridgeReady ? "AlipayJSBridge listo" : "Esperando bridge..."}
+        </span>
+      </div>
+
+      <div
+        style={{
+          ...styles.resultBox,
+          borderColor: authCode ? "#5eead4" : error ? "#ef4444" : "#2a2d3e",
+        }}
+      >
+        <div style={styles.resultLabel}>
+          <span>AuthCode</span>
           {authCode ? (
-            <p style={styles.codeText}>{authCode}</p>
-          ) : error ? (
-            <p style={{ ...styles.codeText, color: "#ef4444", fontSize: 13 }}>✕ {error}</p>
+            <button
+              style={{ ...styles.copyBtn, ...(copied ? styles.copyBtnDone : {}) }}
+              onClick={copyCode}
+            >
+              {copied ? "✅ Copiado" : "📋 Copiar"}
+            </button>
+          ) : null}
+        </div>
+        {authCode ? (
+          <p style={styles.codeText}>{authCode}</p>
+        ) : error ? (
+          <p style={{ ...styles.codeText, color: "#ef4444", fontSize: 13 }}>✕ {error}</p>
+        ) : (
+          <p style={{ ...styles.codeText, color: "#64748b", fontFamily: "inherit", fontSize: 13 }}>
+            Selecciona un método abajo para obtener tu authCode →
+          </p>
+        )}
+      </div>
+
+      <div style={styles.methods}>
+        {AUTH_METHODS.map((item) => (
+          <button
+            key={item.id}
+            style={{
+              ...styles.card,
+              ...(loadingId === item.id ? styles.cardLoading : {}),
+            }}
+            onClick={() => callMethod(item)}
+            disabled={loadingId !== null}
+          >
+            <span style={{ fontSize: 22 }}>{item.icon}</span>
+            <div style={{ flex: 1, textAlign: "left" }}>
+              <div style={styles.cardName}>
+                getUser<strong>{item.method}</strong>AuthCode
+              </div>
+              <div style={styles.cardScopes}>{item.scopes.join(" · ")}</div>
+            </div>
+            {loadingId === item.id ? (
+              <span style={styles.spinner} />
+            ) : (
+              <span style={{ color: "#64748b", fontSize: 20 }}>›</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      <div style={styles.warning}>
+        <strong>⚠️ Solo funciona dentro del WebView de Toka</strong>
+        <br />
+        En un navegador normal, <code>AlipayJSBridge</code> no estará disponible. Si el estado se
+        queda esperando, recarga la vista de Toka y confirma que el bridge esté expuesto.
+      </div>
+
+      <div style={styles.logSection}>
+        <div style={styles.logTitle}>Log de llamadas</div>
+        <div style={styles.logBox}>
+          {logs.length === 0 ? (
+            <span style={{ color: "#64748b", fontStyle: "italic", fontSize: 11 }}>
+              Sin actividad...
+            </span>
           ) : (
-            <p style={{ ...styles.codeText, color: "#64748b", fontFamily: "inherit", fontSize: 13 }}>
-              Selecciona un método abajo para obtener tu authCode →
-            </p>
+            logs.map((logEntry, index) => (
+              <div key={`${logEntry.time}-${index}`} style={{ display: "flex", gap: 8, lineHeight: 1.8 }}>
+                <span style={{ color: "#64748b", flexShrink: 0 }}>{logEntry.time}</span>
+                <span
+                  style={{
+                    color:
+                      logEntry.type === "ok"
+                        ? "#22c55e"
+                        : logEntry.type === "err"
+                          ? "#ef4444"
+                          : "#7c6df0",
+                  }}
+                >
+                  {logEntry.msg}
+                </span>
+              </div>
+            ))
           )}
         </div>
-
-        <div style={styles.methods}>
-          {AUTH_METHODS.map((item) => (
-            <button
-              key={item.id}
-              style={{
-                ...styles.card,
-                ...(loadingId === item.id ? styles.cardLoading : {}),
-              }}
-              onClick={() => callMethod(item)}
-              disabled={loadingId !== null}
-            >
-              <span style={{ fontSize: 22 }}>{item.icon}</span>
-              <div style={{ flex: 1, textAlign: "left" }}>
-                <div style={styles.cardName}>
-                  getUser<strong>{item.method}</strong>AuthCode
-                </div>
-                <div style={styles.cardScopes}>{item.scopes.join(" · ")}</div>
-              </div>
-              {loadingId === item.id ? (
-                <span style={styles.spinner} />
-              ) : (
-                <span style={{ color: "#64748b", fontSize: 20 }}>›</span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        <div style={styles.warning}>
-          <strong>⚠️ Solo funciona dentro del WebView de Toka</strong>
-          <br />
-          En un navegador normal, <code>AlipayJSBridge</code> no estará disponible. Abre esta
-          página desde la app de Toka o el simulador de Alipay Dev Tools.
-        </div>
-
-        <div style={styles.logSection}>
-          <div style={styles.logTitle}>Log de llamadas</div>
-          <div style={styles.logBox}>
-            {logs.length === 0 ? (
-              <span style={{ color: "#64748b", fontStyle: "italic", fontSize: 11 }}>
-                Sin actividad...
-              </span>
-            ) : (
-              logs.map((logEntry, index) => (
-                <div key={`${logEntry.time}-${index}`} style={{ display: "flex", gap: 8, lineHeight: 1.8 }}>
-                  <span style={{ color: "#64748b", flexShrink: 0 }}>{logEntry.time}</span>
-                  <span
-                    style={{
-                      color:
-                        logEntry.type === "ok"
-                          ? "#22c55e"
-                          : logEntry.type === "err"
-                            ? "#ef4444"
-                            : "#7c6df0",
-                    }}
-                  >
-                    {logEntry.msg}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
       </div>
-    </>
+    </div>
   );
 }
 
