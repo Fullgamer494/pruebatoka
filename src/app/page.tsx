@@ -1,7 +1,7 @@
 "use client";
 
 import Script from "next/script";
-import { useState, useCallback, useEffect } from "react";
+import { useState, useEffect } from "react";
 
 export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
@@ -12,8 +12,9 @@ export default function Home() {
     setLogs((prev) => [...prev, `${new Date().toLocaleTimeString()} - ${msg}`]);
   };
 
+  const APP_ID = process.env.NEXT_PUBLIC_TOKA_APP_ID || '3500020265479238';
+
   const getBridge = () => {
-    // Definimos los tipos aquí de manera rústica para mantenerlo simple.
     const w = window as any;
     if (typeof window !== "undefined" && w.AlipayJSBridge) {
       return w.AlipayJSBridge;
@@ -21,62 +22,63 @@ export default function Home() {
     return null;
   };
 
-  const authenticateWithServer = async (code: string) => {
-    addLog(`Enviando authCode al backend (/api/toka/authenticate)...`);
-    try {
-      const res = await fetch("/api/toka/authenticate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ authcode: code }),
-      });
-      const data = await res.json();
-
-      if (res.ok && data.success && data.data?.accessToken) {
-        addLog(`JWT Obtenido exitosamente ✓`);
-        setJwt(data.data.accessToken);
-      } else {
-        addLog(`Respuesta del servidor: ${JSON.stringify(data)}`);
-      }
-    } catch (e) {
-      addLog(`Error en fetch: ${(e as Error).message}`);
-    }
-  };
-
-  const requestAuthCode = useCallback(() => {
+  const getAuthCode = (method: string, scopes: string[]) => {
     const bridge = getBridge();
     if (!bridge) {
       addLog("AlipayJSBridge no está disponible. Abre esta app desde Toka.");
       return;
     }
 
-    addLog("Llamando a getUserDigitalIdentityAuthCode...");
+    addLog(`Llamando a getUser${method}AuthCode...`);
+    
+    let respondio = false;
+    let to = setTimeout(() => {
+      if (!respondio) addLog(`TIMEOUT (Colgado): ${method}`);
+    }, 4000);
 
-    // Se inyecta obligatoriamente el appId para H5 y se lee el código desde res.result
-    // En H5, el callback de éxito/falla siempre debe enviarse como 3er parámetro a la función call
-    // a diferencia de en Nativo donde va adentro del objeto
-    bridge.call('getUserDigitalIdentityAuthCode', {
-      appId: process.env.NEXT_PUBLIC_TOKA_APP_ID || '3500020265479238',
-      usage: 'Autenticación inicial de la Mini App',
-      scopes: ['USER_ID', 'USER_AVATAR', 'USER_NICKNAME']
+    bridge.call(`getUser${method}AuthCode`, {
+      appId: APP_ID,
+      usage: `Autorización para ${method}`,
+      scopes: scopes
     }, (res: any) => {
-      // Validamos si la respuesta vino con un error
+      respondio = true;
+      clearTimeout(to);
+
       if (res.error || res.errorMessage || (res.resultCode && res.resultCode !== 10000)) {
-        addLog(`Fail - Error: ${JSON.stringify(res)}`);
+        addLog(`Fail ${method} - Error: ${JSON.stringify(res)}`);
       } else {
-        addLog(`Success - Respuesta: ${JSON.stringify(res)}`);
-        
-        // En Toka H5, el código viene en la propiedad "result" en lugar de "authCode"
-        const code = res.result || res.authcode || res.authCode;
-        if (code) {
-          setAuthCode(code);
-          authenticateWithServer(code);
-        } else {
-          addLog("AuthCode no encontrado en la respuesta (res.result está vacío).");
-        }
+        const code = res.result || res.authcode || res.authCode || JSON.stringify(res);
+        addLog(`Success ${method} - AuthCode obtenido: ${code}`);
+        setAuthCode(code);
       }
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  };
+
+  const authenticateWithServer = async () => {
+    if (!authCode) {
+      addLog("⚠️ Cuidado: No hay un AuthCode seleccionado o generado para enviar.");
+      return;
+    }
+    
+    addLog(`Enviando authCode (${authCode}) al backend (/api/toka/authenticate)...`);
+    try {
+      const res = await fetch("/api/toka/authenticate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authcode: authCode }),
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success && data.data?.accessToken) {
+        addLog(`🎉 JWT Obtenido exitosamente ✓`);
+        setJwt(data.data.accessToken);
+      } else {
+        addLog(`❌ Respuesta del servidor: ${JSON.stringify(data)}`);
+      }
+    } catch (e) {
+      addLog(`❌ Error en fetch: ${(e as Error).message}`);
+    }
+  };
 
   useEffect(() => {
     const onBridgeReady = () => {
@@ -84,7 +86,6 @@ export default function Home() {
     };
     document.addEventListener("AlipayJSBridgeReady", onBridgeReady);
 
-    // Verificamos si ya estaba listo al cargar
     if (getBridge()) {
       onBridgeReady();
     }
@@ -94,7 +95,6 @@ export default function Home() {
 
   return (
     <div style={{ padding: 20, fontFamily: "sans-serif", maxWidth: 600, margin: "0 auto", background: "#f9f9f9", minHeight: "100vh", color: "#333" }}>
-      {/* Importamos el SDK de miniapps H5 */}
       <Script
         src="https://cdn.marmot-cloud.com/npm/hylid-bridge/2.10.0/index.js"
         strategy="beforeInteractive"
@@ -103,22 +103,39 @@ export default function Home() {
 
       <h1 style={{ fontSize: 24, marginBottom: 10 }}>Autenticación Toka Minimal</h1>
       <p style={{ fontSize: 14, color: "#666", marginBottom: 20 }}>
-        Flujo básico y esencial de obtención de AuthCode e intercambio por JWT.
+        Paso 1: Obtén un código usando cualquiera de los 5 botones. <br/>
+        Paso 2: Canjea el código obtenido por el JWT en nuestro Backend.
       </p>
 
-      <button
-        onClick={requestAuthCode}
-        style={{ width: '100%', padding: '12px 20px', fontSize: 16, cursor: 'pointer', background: '#4F46E5', color: 'white', border: 'none', borderRadius: 8, marginBottom: 20, fontWeight: 'bold' }}
-      >
-        Obtener AuthCode y JWT
-      </button>
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginBottom: "20px" }}>
+        <button onClick={() => getAuthCode('DigitalIdentity', ['USER_ID', 'USER_AVATAR', 'USER_NICKNAME'])} style={btnStyle}>
+          1. GET Digital Identity AuthCode
+        </button>
+        <button onClick={() => getAuthCode('ContactInformation', ['PLAINTEXT_MOBILE_PHONE', 'PLAINTEXT_EMAIL_ADDRESS'])} style={btnStyle}>
+          2. GET Contact Info AuthCode
+        </button>
+        <button onClick={() => getAuthCode('AddressInformation', ['USER_ADDRESS'])} style={btnStyle}>
+          3. GET Address Info AuthCode
+        </button>
+        <button onClick={() => getAuthCode('PersonalInformation', ['USER_NAME', 'USER_FIRST_SURNAME', 'USER_SECOND_SURNAME', 'USER_GENDER', 'USER_BIRTHDAY', 'USER_STATE_OF_BIRTH', 'USER_NATIONALITY'])} style={btnStyle}>
+          4. GET Personal Info AuthCode
+        </button>
+        <button onClick={() => getAuthCode('KYCStatus', ['USER_KYC_STATUS'])} style={btnStyle}>
+          5. GET KYC Status AuthCode
+        </button>
+      </div>
 
-      {authCode && (
-        <div style={{ background: '#E0E7FF', padding: 15, borderRadius: 8, marginBottom: 15, border: '1px solid #C7D2FE' }}>
-          <strong style={{ display: 'block', marginBottom: 5, color: '#3730A3' }}>AuthCode:</strong>
-          <code style={{ wordBreak: 'break-all' }}>{authCode}</code>
-        </div>
-      )}
+      <div style={{ background: '#E0E7FF', padding: 15, borderRadius: 8, marginBottom: 15, border: '1px solid #C7D2FE' }}>
+        <strong style={{ display: 'block', marginBottom: 5, color: '#3730A3' }}>AuthCode Preparado:</strong>
+        <code style={{ wordBreak: 'break-all', fontSize: 16 }}>{authCode || "Ninguno generado aún"}</code>
+      </div>
+
+      <button
+        onClick={authenticateWithServer}
+        style={{ width: '100%', padding: '12px 20px', fontSize: 16, cursor: 'pointer', background: '#10B981', color: 'white', border: 'none', borderRadius: 8, marginBottom: 20, fontWeight: 'bold' }}
+      >
+        CANJEAR AUTHCODE EN BACKEND
+      </button>
 
       {jwt && (
         <div style={{ background: '#DCFCE7', padding: 15, borderRadius: 8, marginBottom: 15, border: '1px solid #BBF7D0' }}>
@@ -137,3 +154,5 @@ export default function Home() {
     </div>
   );
 }
+
+const btnStyle = { padding: '10px 15px', fontSize: 14, cursor: 'pointer', background: '#4F46E5', color: 'white', border: 'none', borderRadius: 5 };
