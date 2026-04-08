@@ -31,6 +31,21 @@ type BridgeCallOptions = {
   fail: (res: BridgeResponse) => void;
 };
 
+type TokaAuthData = {
+  userId: string;
+  accessToken: string;
+  tokenType: string;
+  expiresIn: number;
+  [key: string]: unknown;
+};
+
+type TokaAuthenticateResponse = {
+  success: boolean;
+  statusCode: number;
+  message: string;
+  data?: TokaAuthData | null;
+};
+
 declare global {
   interface Window {
     AlipayJSBridge?: {
@@ -98,6 +113,10 @@ export default function AuthCodeGenerator() {
   const [authCode, setAuthCode] = useState("");
   const [error, setError] = useState("");
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [exchangeLoading, setExchangeLoading] = useState(false);
+  const [exchangeError, setExchangeError] = useState("");
+  const [exchangeMessage, setExchangeMessage] = useState("");
+  const [exchangeData, setExchangeData] = useState<TokaAuthData | null>(null);
   const [copied, setCopied] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>(() => [
     { type: "info", msg: "Buscando AlipayJSBridge...", time: getTimestamp() },
@@ -107,6 +126,48 @@ export default function AuthCodeGenerator() {
   const addLog = useCallback((type: LogEntry["type"], msg: string) => {
     setLogs((prev) => [{ type, msg, time: getTimestamp() }, ...prev].slice(0, 50));
   }, []);
+
+  const exchangeAuthCode = useCallback(
+    async (code: string) => {
+      setExchangeLoading(true);
+      setExchangeError("");
+      setExchangeMessage("Canjeando authCode en Toka...");
+      setExchangeData(null);
+      addLog("info", "POST /api/toka/authenticate");
+
+      try {
+        const response = await fetch("/api/toka/authenticate", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ authcode: code }),
+        });
+
+        const payload = (await response.json()) as TokaAuthenticateResponse;
+
+        if (!response.ok || !payload.success || !payload.data?.accessToken) {
+          const message = payload.message || `Toka respondió con status ${response.status}`;
+          setExchangeError(message);
+          setExchangeMessage("No fue posible canjear el authCode.");
+          addLog("err", message);
+          return;
+        }
+
+        setExchangeData(payload.data);
+        setExchangeMessage(payload.message || "Authentication successful.");
+        addLog("ok", `JWT recibido para userId ${payload.data.userId}`);
+      } catch (caughtError) {
+        const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
+        setExchangeError(message);
+        setExchangeMessage("Error al consumir la API de Toka.");
+        addLog("err", `Error en authenticate: ${message}`);
+      } finally {
+        setExchangeLoading(false);
+      }
+    },
+    [addLog],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -173,12 +234,15 @@ export default function AuthCodeGenerator() {
       setLoadingId(id);
       setError("");
       setAuthCode("");
+      setExchangeError("");
+      setExchangeMessage("");
+      setExchangeData(null);
       addLog("info", `Llamando getUser${method}AuthCode...`);
 
       requestTimeoutRef.current = window.setTimeout(() => {
         requestTimeoutRef.current = null;
         setLoadingId(null);
-        const msg = `Tiempo de espera agotado para ${method}. El bridge no respondió con success/fail.`;
+        const msg = `Timeout: el bridge no respondió con success/fail para ${method}.`;
         setError(msg);
         addLog("err", msg);
       }, 12000);
@@ -211,6 +275,7 @@ export default function AuthCodeGenerator() {
             setAuthCode(code);
             setLoadingId(null);
             addLog("ok", `[${method}] authCode: ${code.slice(0, 24)}...`);
+            void exchangeAuthCode(code);
           },
           fail(res) {
             if (requestTimeoutRef.current !== null) {
@@ -236,7 +301,7 @@ export default function AuthCodeGenerator() {
         addLog("err", `Excepción: ${msg}`);
       }
     },
-    [addLog],
+    [addLog, exchangeAuthCode],
   );
 
   const copyCode = useCallback(async () => {
@@ -296,6 +361,58 @@ export default function AuthCodeGenerator() {
         ) : (
           <p style={{ ...styles.codeText, color: "#64748b", fontFamily: "inherit", fontSize: 13 }}>
             Selecciona un método abajo para obtener tu authCode →
+          </p>
+        )}
+      </div>
+
+      <div
+        style={{
+          ...styles.resultBox,
+          borderColor: exchangeData ? "#5eead4" : exchangeError ? "#ef4444" : "#2a2d3e",
+        }}
+      >
+        <div style={styles.resultLabel}>
+          <span>JWT / userId</span>
+          <span style={{ color: exchangeLoading ? "#f59e0b" : "#64748b" }}>
+            {exchangeLoading ? "Canjeando..." : exchangeData ? "Listo" : "Pendiente"}
+          </span>
+        </div>
+        {exchangeLoading ? (
+          <p style={{ ...styles.codeText, color: "#f59e0b", fontFamily: "inherit", fontSize: 13 }}>
+            Canjeando authCode contra /v1/user/authenticate...
+          </p>
+        ) : exchangeData ? (
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={styles.metaGrid}>
+              <div>
+                <div style={styles.metaLabel}>User ID</div>
+                <div style={styles.metaValue}>{exchangeData.userId}</div>
+              </div>
+              <div>
+                <div style={styles.metaLabel}>Token type</div>
+                <div style={styles.metaValue}>{exchangeData.tokenType}</div>
+              </div>
+              <div>
+                <div style={styles.metaLabel}>Expires in</div>
+                <div style={styles.metaValue}>{exchangeData.expiresIn}s</div>
+              </div>
+            </div>
+            <div>
+              <div style={styles.metaLabel}>Access token</div>
+              <p style={styles.codeText}>{exchangeData.accessToken}</p>
+            </div>
+            <div>
+              <div style={styles.metaLabel}>Message</div>
+              <p style={{ ...styles.codeText, color: "#e2e8f0", fontFamily: "inherit", fontSize: 13 }}>
+                {exchangeMessage || "Authentication successful."}
+              </p>
+            </div>
+          </div>
+        ) : exchangeError ? (
+          <p style={{ ...styles.codeText, color: "#ef4444", fontSize: 13 }}>✕ {exchangeError}</p>
+        ) : (
+          <p style={{ ...styles.codeText, color: "#64748b", fontFamily: "inherit", fontSize: 13 }}>
+            Aquí aparecerá la respuesta de <code>/v1/user/authenticate</code> cuando llegue el authCode.
           </p>
         )}
       </div>
@@ -421,6 +538,24 @@ const styles = {
     color: "#5eead4",
     wordBreak: "break-all",
     lineHeight: 1.6,
+  },
+  metaGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    gap: 12,
+  },
+  metaLabel: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: "#64748b",
+    textTransform: "uppercase",
+    letterSpacing: ".8px",
+    marginBottom: 4,
+  },
+  metaValue: {
+    fontSize: 13,
+    color: "#e2e8f0",
+    wordBreak: "break-word",
   },
   copyBtn: {
     background: "rgba(94,234,212,.1)",

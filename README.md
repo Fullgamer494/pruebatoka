@@ -1,4 +1,16 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+AuthCode Generator for Toka / Alipay.
+
+## Configuration
+
+Create a `.env.local` file from `.env.example` and set:
+
+- `TOKA_APP_ID`: the 16-character `X-App-Id` required by Toka.
+- `TOKA_API_BASE_URL`: optional API base URL. Defaults to the Toka base URL from the developer guide.
+
+## How it works
+
+The homepage obtains an authCode from `window.AlipayJSBridge`, then sends it to the local route `POST /api/toka/authenticate`.
+That route forwards the request to Toka with the required `X-App-Id` header and returns the JWT/userId payload to the UI.
 
 ## Getting Started
 
@@ -16,7 +28,7 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+You can start editing the page by modifying `src/app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
