@@ -4,6 +4,7 @@ const DEFAULT_TOKA_BASE_URL = "http://talentland-toka.eastus2.cloudapp.azure.com
 
 export async function POST(request: Request) {
   const appId = process.env.TOKA_APP_ID || "3500020265479238";
+  const merchantCode = process.env.TOKA_MERCHANT_CODE || "";
   const baseUrl = (process.env.TOKA_API_BASE_URL ?? DEFAULT_TOKA_BASE_URL).replace(/\/$/, "");
 
   // Extraer el Toka Access Token del header Authorization
@@ -27,19 +28,22 @@ export async function POST(request: Request) {
   }
 
   try {
-    // Crear la orden de pago en Toka
-    const tokaResponse = await fetch(`${baseUrl}/v1/payment/pay`, {
+    // POST /v1/payment/create — Documentación oficial de Toka
+    const tokaResponse = await fetch(`${baseUrl}/v1/payment/create`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-App-Id": appId,
         "Authorization": `Bearer ${tokaAccessToken}`,
+        "Alipay-MerchantCode": merchantCode,
       },
       body: JSON.stringify({
-        amount: body.amount || 100,
-        subject: body.description || "Suscripción Toka Tribe",
-        outTradeNo: `TOKA_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        subscriptionTier: body.subscriptionTier,
+        userId: body.userId || "000000000000000",
+        orderTitle: body.orderTitle || body.description || "Suscripción Toka Tribe",
+        orderAmount: {
+          value: String(body.amount || "100"),
+          currency: "MXN",
+        },
       }),
     });
 
@@ -55,6 +59,9 @@ export async function POST(request: Request) {
       );
     }
 
+    // Respuesta exitosa de Toka:
+    // { success: true, statusCode: 200, message: "Payment created successfully.",
+    //   data: { paymentId: "2026...", paymentUrl: "https://app.sit.nonprod.paypay.mx/..." } }
     return NextResponse.json(payload, { status: tokaResponse.status });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Error contactando Toka para pagos.";

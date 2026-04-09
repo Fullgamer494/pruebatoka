@@ -130,44 +130,47 @@ export default function Home() {
 
       const data = await res.json();
 
-      if (!res.ok) {
+      if (!res.ok || !data.success) {
         addLog(`❌ Error creando orden: ${JSON.stringify(data)}`);
         setPaymentLoading(null);
         return;
       }
 
-      addLog(`✅ Orden creada. Trade: ${data.tradeNo || data.tradeNO || data.id || JSON.stringify(data)}`);
-      
-      const tradeNO = data.tradeNo || data.tradeNO;
+      const paymentUrl = data.data?.paymentUrl;
+      const paymentId = data.data?.paymentId;
 
+      addLog(`✅ Orden creada. PaymentId: ${paymentId || 'N/A'}`);
+      
       // Paso 3: Abrir la pantalla de pago nativa de Toka
-      if (bridge && tradeNO) {
-        addLog(`📱 Abriendo pantalla de pago de Toka (tradePay)...`);
+      // Documentación Toka: my.call('pay', { paymentUrl }) → en H5: AlipayJSBridge.call('pay', { paymentUrl }, callback)
+      if (bridge && paymentUrl) {
+        addLog(`📱 Abriendo pantalla de pago de Toka...`);
         
-        bridge.call('tradePay', {
-          tradeNO: tradeNO
+        bridge.call('pay', {
+          paymentUrl: paymentUrl
         }, (payResult: any) => {
-          const resultCode = payResult.resultCode || payResult.result_code;
+          addLog(`ℹ️ Resultado del pago: ${JSON.stringify(payResult)}`);
           
-          if (resultCode === '9000' || resultCode === 9000) {
+          const resultCode = String(payResult.resultCode || payResult.result_code || '');
+          
+          if (resultCode === '9000') {
             addLog(`🎉 ¡Pago exitoso! Suscripción ${sub.name} activada.`);
-            syncPayment(data.id || data.paymentId);
-          } else if (resultCode === '6001' || resultCode === 6001) {
+            if (paymentId) syncPayment(paymentId);
+          } else if (resultCode === '6001') {
             addLog(`⚠️ Pago cancelado por el usuario.`);
-          } else if (resultCode === '4000' || resultCode === 4000) {
-            addLog(`❌ Pago fallido. Código: ${resultCode}`);
+          } else if (resultCode === '4000') {
+            addLog(`❌ Pago fallido.`);
           } else {
-            addLog(`ℹ️ Resultado del pago: ${JSON.stringify(payResult)}`);
+            // Intentar sincronizar de todos modos para verificar estado real
+            if (paymentId) syncPayment(paymentId);
           }
           setPaymentLoading(null);
         });
       } else if (!bridge) {
-        // Fuera del WebView: mostrar resultado directo del backend
-        addLog(`ℹ️ Sin bridge nativo. Respuesta directa: ${JSON.stringify(data)}`);
+        addLog(`ℹ️ Sin bridge nativo. PaymentUrl: ${paymentUrl || 'No disponible'}`);
         setPaymentLoading(null);
       } else {
-        // No se recibió tradeNO del backend
-        addLog(`⚠️ El backend no devolvió un tradeNO. Respuesta: ${JSON.stringify(data)}`);
+        addLog(`⚠️ El servidor no devolvió paymentUrl. Respuesta: ${JSON.stringify(data)}`);
         setPaymentLoading(null);
       }
 
