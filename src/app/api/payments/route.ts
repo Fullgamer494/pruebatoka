@@ -4,7 +4,6 @@ const DEFAULT_TOKA_BASE_URL = "http://talentland-toka.eastus2.cloudapp.azure.com
 
 export async function POST(request: Request) {
   const appId = process.env.TOKA_APP_ID || "3500020265479238";
-  const merchantCode = process.env.TOKA_MERCHANT_CODE || "";
   const baseUrl = (process.env.TOKA_API_BASE_URL ?? DEFAULT_TOKA_BASE_URL).replace(/\/$/, "");
 
   // Extraer el Toka Access Token del header Authorization
@@ -35,7 +34,6 @@ export async function POST(request: Request) {
         "Content-Type": "application/json",
         "X-App-Id": appId,
         "Authorization": `Bearer ${tokaAccessToken}`,
-        "Alipay-MerchantCode": merchantCode,
       },
       body: JSON.stringify({
         userId: body.userId || "000000000000000",
