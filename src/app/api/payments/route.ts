@@ -26,10 +26,7 @@ export async function POST(request: Request) {
     );
   }
 
-  // El value debe ser string con formato decimal "1.00"
-  const amountValue = body.amount
-    ? (Number(body.amount) / 100).toFixed(2)
-    : "1.00";
+  const amountValue = String(body.amount || "10");
 
   const tokaPayload = {
     userId: body.userId || "000000000000000",
