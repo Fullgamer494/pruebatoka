@@ -133,8 +133,16 @@ export default function Home() {
 
       const data = await res.json();
 
+      // Siempre loggear el debug si existe
+      if (data.debug) {
+        addLog(`🔍 DEBUG → Enviado a: ${data.debug.sentTo}`);
+        addLog(`🔍 DEBUG → Headers: ${JSON.stringify(data.debug.sentHeaders)}`);
+        addLog(`🔍 DEBUG → Body: ${JSON.stringify(data.debug.sentBody)}`);
+        addLog(`🔍 DEBUG → Toka respondió: ${data.debug.tokaStatus}`);
+      }
+
       if (!res.ok || !data.success) {
-        addLog(`❌ Error creando orden: ${JSON.stringify(data)}`);
+        addLog(`❌ Error creando orden (${res.status}): ${data.message || JSON.stringify(data)}`);
         setPaymentLoading(null);
         return;
       }
