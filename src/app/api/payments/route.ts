@@ -34,6 +34,7 @@ export async function POST(request: Request) {
         "Content-Type": "application/json",
         "X-App-Id": appId,
         "Authorization": `Bearer ${tokaAccessToken}`,
+        "Alipay-MerchantCode": "TKTRI",
       },
       body: JSON.stringify({
         userId: body.userId || "000000000000000",
