@@ -115,7 +115,7 @@ export default function Home() {
 
     try {
       // Paso 2: Crear la orden de pago en el backend
-      const res = await fetch(`${API_BASE}/payments`, {
+      const res = await fetch(`/api/payments`, {
         method: "POST",
         headers: { 
           "Content-Type": "application/json",
@@ -182,7 +182,7 @@ export default function Home() {
     if (!paymentId) return;
     addLog(`🔄 Sincronizando estado del pago ${paymentId}...`);
     try {
-      const res = await fetch(`${API_BASE}/payments/${paymentId}/sync`, {
+      const res = await fetch(`/api/payments/${paymentId}/sync`, {
         method: "POST",
         headers: { 
           "Content-Type": "application/json",
