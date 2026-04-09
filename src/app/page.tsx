@@ -22,6 +22,7 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [authCode, setAuthCode] = useState<string>("");
   const [jwt, setJwt] = useState<string>("");
+  const [userId, setUserId] = useState<string>("");
   const [paymentLoading, setPaymentLoading] = useState<string | null>(null);
 
   const addLog = (msg: string) => {
@@ -89,8 +90,9 @@ export default function Home() {
       const data = await res.json();
 
       if (res.ok && data.success && data.data?.accessToken) {
-        addLog(`🎉 JWT Obtenido exitosamente ✓`);
+        addLog(`🎉 JWT Obtenido exitosamente ✓ (userId: ${data.data.userId})`);
         setJwt(data.data.accessToken);
+        setUserId(data.data.userId || '');
       } else {
         addLog(`❌ Respuesta del servidor: ${JSON.stringify(data)}`);
       }
@@ -123,7 +125,8 @@ export default function Home() {
         },
         body: JSON.stringify({
           amount: sub.price,
-          description: `Suscripción ${sub.name} - Multiplicador ${sub.multiplier}`,
+          userId: userId,
+          orderTitle: `Suscripción ${sub.name} - ${sub.multiplier}`,
           subscriptionTier: sub.tier,
         }),
       });
